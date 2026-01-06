@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+    <meta charset="UTF-8">
+    <title>Technion Course Planner</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background-color: #f9f9f9; }
+        h1 { color: #333; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        select { padding: 10px; font-size: 16px; margin-left: 10px; }
+        button { padding: 10px 20px; font-size: 16px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        ul { list-style-type: none; padding-right: 20px; border-right: 2px solid #eee; margin-right: 10px; }
+        li { margin: 10px 0; position: relative; }
+        li::before {
+            content: '';
+            position: absolute;
+            top: 15px;
+            right: -22px;
+            width: 20px;
+            height: 1px;
+            background: #ccc;
+        }
+        .node { 
+            border: 1px solid #ddd; 
+            padding: 10px; 
+            border-radius: 4px; 
+            background-color: #fff; 
+            display: inline-block;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+        .node.missing { background-color: #eee; color: #888; border-color: #ccc; }
+        .req-str { font-size: 0.85em; color: #777; display: block; margin-top: 4px; }
+        .course-id { font-weight: bold; color: #0056b3; }
+        .loading { color: #666; font-style: italic; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>מתכנן מערכת שעות - הנדסה ביו-רפואית</h1>
+        <p>בחר קורס מהרשימה כדי לראות את עץ הקדמים שלו.</p>
+        
+        <div id="controls">
+            <label for="courseSelect">בחר קורס:</label>
+            <select id="courseSelect">
+                <option value="" disabled selected>טוען נתונים...</option>
+            </select>
+        </div>
+
+        <hr>
+        <div id="resultArea"></div>
+    </div>
+
+    <script>
+        let coursesData = [];
+        let allowedCourses = new Set();
+        let courseCache = {}; // Cache for getRequirements results? No, JS object references handle caching implicitly if we reuse objects, but here we just recompute.
+
+        // Initialize application
+        async function init() {
+            try {
+                const [cResp, vResp] = await Promise.all([
+                    fetch('courses.json'),
+                    fetch('valid_courses.json')
+                ]);
+
+                if (!cResp.ok || !vResp.ok) throw new Error("Failed to load data files");
+
+                coursesData = await cResp.json();
+                const validList = await vResp.json();
+                allowedCourses = new Set(validList);
+
+                populateSelect(validList);
+            } catch (err) {
+                console.error(err);
+                document.getElementById('courseSelect').innerHTML = `<option>Error loading data</option>`;
+                document.getElementById('resultArea').innerHTML = `<p class="error">שגיאה בטעינת הנתונים: ${err.message}</p>`;
+            }
+        }
+
+        function populateSelect(list) {
+            const select = document.getElementById('courseSelect');
+            select.innerHTML = ''; // Clear "Loading..."
+
+            const defaultOpt = document.createElement('option');
+            defaultOpt.value = "";
+            defaultOpt.text = "בחר...";
+            defaultOpt.disabled = true;
+            defaultOpt.selected = true;
+            select.add(defaultOpt);
+
+            // Assuming list is already sorted from Python script
+            list.forEach(id => {
+                const opt = document.createElement('option');
+                opt.value = id;
+                opt.text = id;
+                select.add(opt);
+            });
+
+            select.addEventListener('change', (e) => {
+                const id = e.target.value;
+                if (id) renderTreeFor(id);
+            });
+        }
+
+        function getCourse(id) {
+            return coursesData.find(c => c.general['מספר מקצוע'] === id);
+        }
+
+        // Ported Logic from app.py
+        function getRequirements(courseId, visited = new Set()) {
+            if (visited.has(courseId)) {
+                return { id: courseId, name: "Cycle Detected", reqs: [] };
+            }
+            const newVisited = new Set(visited);
+            newVisited.add(courseId);
+
+            let data;
+            try {
+                data = getCourse(courseId);
+                if (!data) throw new Error("Not found");
+            } catch (e) {
+                return { id: courseId, name: `Error: ${e.message}`, reqs: [], req_str: "" };
+            }
+
+            const general = data.general || {};
+            const name = general['שם מקצוע'] || '';
+            const reqsStr = general['מקצועות קדם'] || '';
+
+            // Split branches by ()
+            // Python: re.findall(r'\(([^()]*)\)', reqs_str)
+            let branchMatches = [];
+            // Simple regex for top-level parentheses is tricky if nested, but assuming no nesting based on original code
+            const parenRegex = /\(([^()]*)\)/g;
+            let match;
+            let hasParens = false;
+            
+            // We need to loop manually to catch all
+            while ((match = parenRegex.exec(reqsStr)) !== null) {
+                hasParens = true;
+                branchMatches.push(match[1]);
+            }
+            
+            if (!hasParens) {
+                branchMatches = [reqsStr];
+            }
+
+            let branchNodes = [];
+            for (const branch of branchMatches) {
+                // Find all 8 digit numbers in this branch string
+                const reqIds = branch.match(/\d{8}/g) || [];
+                if (reqIds.length === 0) continue;
+
+                let branchHasMissing = false;
+                let branchChildren = [];
+
+                for (const reqId of reqIds) {
+                    if (allowedCourses.has(reqId)) {
+                        const child = getRequirements(reqId, newVisited);
+                        // In Python: if child.get('missing'): branch_has_missing = True
+                        // But we determined missing is never set true in Python code. 
+                        // However, let's keep the structure.
+                        if (child.missing) branchHasMissing = true;
+                        branchChildren.push(child);
+                    } else {
+                        branchHasMissing = true;
+                    }
+                }
+
+                if (!branchHasMissing) {
+                    if (branchChildren.length === 1) {
+                        branchNodes.push(branchChildren[0]);
+                    } else {
+                        branchNodes.push({
+                            id: branchChildren.map(c => c.id).join(" & "),
+                            name: "דרישות קדם: " + branchChildren.map(c => c.name).join(", "),
+                            reqs: branchChildren,
+                            req_str: branch
+                        });
+                    }
+                }
+            }
+
+            return { id: courseId, name: name, reqs: branchNodes, req_str: reqsStr };
+        }
+
+        function renderNode(node) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'node-wrapper';
+
+            const nodeDiv = document.createElement('div');
+            nodeDiv.className = 'node' + (node.missing ? ' missing' : '');
+            
+            let html = `<span class="course-id">${node.id}</span> ${node.name}`;
+            if (node.req_str) {
+                html += `<span class="req-str">דרישות קדם: ${node.req_str}</span>`;
+            }
+            nodeDiv.innerHTML = html;
+            wrapper.appendChild(nodeDiv);
+
+            if (node.reqs && node.reqs.length > 0) {
+                const ul = document.createElement('ul');
+                node.reqs.forEach(child => {
+                    const li = document.createElement('li');
+                    li.appendChild(renderNode(child));
+                    ul.appendChild(li);
+                });
+                wrapper.appendChild(ul);
+            }
+
+            return wrapper;
+        }
+
+        function renderTreeFor(courseId) {
+            const resultArea = document.getElementById('resultArea');
+            resultArea.innerHTML = '';
+            
+            const treeData = getRequirements(courseId);
+            
+            const header = document.createElement('h2');
+            header.innerHTML = `דרישות עבור: <span dir="ltr">${treeData.id}</span> - ${treeData.name}`;
+            resultArea.appendChild(header);
+
+            const treeContainer = document.createElement('div');
+            treeContainer.className = 'tree-container';
+            treeContainer.appendChild(renderNode(treeData));
+            resultArea.appendChild(treeContainer);
+        }
+
+        // Start
+        init();
+    </script>
+</body>
+</html>
