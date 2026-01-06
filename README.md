@@ -39,3 +39,7 @@ This web application displays the prerequisite tree for Technion courses, using 
 
 ## Contact
 For questions or further development, contact the original author or open an issue if hosted on a repository.
+
+## Acknowledgments
+The technion-sap-info-fecher was created by Michael Maltsev (from Cheesfork fame) and can be found at https://github.com/michael-maltsev/technion-sap-info-fetcher 
+The project was inspired by Lior Romano
